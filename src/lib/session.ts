@@ -1,5 +1,10 @@
-export function getSessionToken(roomId: string): string {
-  const key = `hotshot_session_${roomId}`;
+export function getSessionToken(keySuffix: string): string {
+  if (typeof window === "undefined") {
+    // Server-side render safe fallback
+    return "";
+  }
+
+  const key = `hotshot_session_${keySuffix}`;
   let token = localStorage.getItem(key);
 
   if (!token) {

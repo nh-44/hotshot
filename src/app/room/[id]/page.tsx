@@ -6,7 +6,6 @@ import { supabase } from "@/lib/supabaseClient";
 import { getSessionToken } from "@/lib/session";
 import AddOption from "./components/AddOption";
 
-
 /* ================= TYPES ================= */
 
 type Room = {
@@ -30,24 +29,28 @@ type Option = {
   votes_count: number;
 };
 
+type ResultRow = {
+  players: { name: string };
+  options: { text: string };
+  questions: { text: string };
+};
+
 /* ================= COMPONENT ================= */
 
 export default function RoomPage() {
   const { id: roomId } = useParams();
 
-  /* ---------- Core State ---------- */
   const [room, setRoom] = useState<Room | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [activeQuestion, setActiveQuestion] = useState<Question | null>(null);
   const [options, setOptions] = useState<Option[]>([]);
+  const [results, setResults] = useState<ResultRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  /* ---------- Player State ---------- */
   const [name, setName] = useState("");
   const [joined, setJoined] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
 
-  /* ---------- Host Question Creation ---------- */
   const [newQuestionText, setNewQuestionText] = useState("");
   const [newQuestionLimit, setNewQuestionLimit] = useState(10);
 
@@ -59,17 +62,12 @@ export default function RoomPage() {
   useEffect(() => {
     if (!roomId) return;
 
-    const fetchRoom = async () => {
-      const { data } = await supabase
-        .from("rooms")
-        .select("*")
-        .eq("id", roomId)
-        .single();
-
-      setRoom(data);
-    };
-
-    fetchRoom();
+    supabase
+      .from("rooms")
+      .select("*")
+      .eq("id", roomId)
+      .single()
+      .then(({ data }) => setRoom(data));
   }, [roomId]);
 
   /* ================= FETCH QUESTIONS ================= */
@@ -77,23 +75,20 @@ export default function RoomPage() {
   useEffect(() => {
     if (!roomId) return;
 
-    const fetchQuestions = async () => {
-      const { data } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("room_id", roomId)
-        .order("order_index");
-
-      const qs = data || [];
-      setQuestions(qs);
-      setActiveQuestion(qs.find(q => q.status === "open") || null);
-      setLoading(false);
-    };
-
-    fetchQuestions();
+    supabase
+      .from("questions")
+      .select("*")
+      .eq("room_id", roomId)
+      .order("order_index")
+      .then(({ data }) => {
+        const qs = data || [];
+        setQuestions(qs);
+        setActiveQuestion(qs.find(q => q.status === "open") || null);
+        setLoading(false);
+      });
   }, [roomId]);
 
-  /* ================= FETCH OPTIONS (REALTIME) ================= */
+  /* ================= FETCH OPTIONS ================= */
 
   useEffect(() => {
     if (!activeQuestion) {
@@ -146,7 +141,6 @@ export default function RoomPage() {
     });
 
     if (error && error.code !== "23505") {
-      console.error(error);
       alert("Failed to join");
       return;
     }
@@ -157,25 +151,18 @@ export default function RoomPage() {
   /* ================= HOST ACTIONS ================= */
 
   const publishRoom = async () => {
-  const { data, error } = await supabase
-    .from("rooms")
-    .update({ status: "live" })
-    .eq("id", roomId)
-    .select()
-    .single();
+    const { data } = await supabase
+      .from("rooms")
+      .update({ status: "live" })
+      .eq("id", roomId)
+      .select()
+      .single();
 
-  if (error) {
-    console.error(error);
-    alert("Failed to publish room");
-    return;
-  }
-
-  setRoom(data); // ✅ THIS IS THE KEY LINE
-};
-
+    setRoom(data);
+  };
 
   const addQuestion = async () => {
-    if (!newQuestionText.trim()) return alert("Enter a question");
+    if (!newQuestionText.trim()) return;
 
     const nextOrder =
       questions.length > 0
@@ -193,19 +180,19 @@ export default function RoomPage() {
     setNewQuestionText("");
   };
 
-  const openQuestion = async (questionId: string) => {
+  const openQuestion = async (qid: string) => {
     await supabase
       .from("questions")
       .update({ status: "closed" })
-      .eq("room_id", roomId)
-      .eq("status", "open");
+      .eq("room_id", roomId);
 
     await supabase
       .from("questions")
       .update({ status: "open" })
-      .eq("id", questionId);
+      .eq("id", qid);
 
     setHasVoted(false);
+    setResults([]);
   };
 
   const closeQuestion = async () => {
@@ -216,6 +203,7 @@ export default function RoomPage() {
       .update({ status: "closed" })
       .eq("id", activeQuestion.id);
 
+    fetchResults(activeQuestion.id);
     setActiveQuestion(null);
     setHasVoted(false);
   };
@@ -240,6 +228,22 @@ export default function RoomPage() {
   const voteOption = async (optionId: string) => {
     if (!activeQuestion || hasVoted) return;
 
+    const sessionToken = getSessionToken(roomId as string);
+
+    const { data: player } = await supabase
+      .from("players")
+      .select("id")
+      .eq("room_id", roomId)
+      .eq("session_token", sessionToken)
+      .single();
+
+    await supabase.from("votes").insert({
+      room_id: roomId,
+      question_id: activeQuestion.id,
+      option_id: optionId,
+      player_id: player.id,
+    });
+
     await supabase
       .from("options")
       .update({ votes_count: supabase.raw("votes_count + 1") })
@@ -251,28 +255,56 @@ export default function RoomPage() {
   const addOptionAndVote = async (text: string) => {
     if (!text.trim() || !activeQuestion || hasVoted) return;
 
-    const { error } = await supabase.from("options").insert({
-      question_id: activeQuestion.id,
-      text,
-      votes_count: 1,
-    });
+    const { data: option, error } = await supabase
+      .from("options")
+      .insert({
+        question_id: activeQuestion.id,
+        text,
+        votes_count: 1,
+      })
+      .select()
+      .single();
 
-    if (error && error.code === "23505") {
-      await supabase
-        .from("options")
-        .update({ votes_count: supabase.raw("votes_count + 1") })
-        .ilike("text", text.trim())
-        .eq("question_id", activeQuestion.id);
+    if (!error) {
+      voteOption(option.id);
     }
+  };
 
-    await markVoted();
+  /* ================= RESULTS ================= */
+
+  const fetchResults = async (questionId: string) => {
+    const { data } = await supabase
+      .from("votes")
+      .select(`
+        players(name),
+        options(text),
+        questions(text)
+      `)
+      .eq("question_id", questionId);
+
+    setResults(data || []);
+  };
+
+  const downloadCSV = () => {
+    const header = "Question,Player,Option\n";
+    const body = results
+      .map(
+        r =>
+          `"${r.questions.text}","${r.players.name}","${r.options.text}"`
+      )
+      .join("\n");
+
+    const blob = new Blob([header + body], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "hotshot-results.csv";
+    a.click();
   };
 
   /* ================= RENDER ================= */
 
-  if (loading) {
-    return <div className="p-10 text-white">Loading…</div>;
-  }
+  if (loading) return <div className="p-10 text-white">Loading…</div>;
 
   if (!joined && room?.status === "live") {
     return (
@@ -300,47 +332,26 @@ export default function RoomPage() {
     <main className="min-h-screen bg-slate-900 text-white p-6">
       <div className="max-w-xl mx-auto">
 
-        <h1 className="text-2xl font-bold mb-2">{room?.room_name}</h1>
+        <h1 className="text-2xl font-bold mb-4">{room?.room_name}</h1>
 
-        {room?.status === "live" && (
-          <div className="mb-4 text-center">
-            <code className="bg-slate-800 px-3 py-1 rounded">
-              {typeof window !== "undefined" && window.location.href}
-            </code>
-            <button
-              onClick={() =>
-                navigator.clipboard.writeText(window.location.href)
-              }
-              className="ml-2 bg-slate-700 px-2 py-1 rounded"
-            >
-              Copy
-            </button>
-          </div>
+        {isHost && room?.status === "draft" && (
+          <button
+            disabled={questions.length === 0}
+            onClick={publishRoom}
+            className="w-full bg-green-600 py-2 rounded font-bold mb-4"
+          >
+            Publish Room
+          </button>
         )}
 
-        {/* HOST: PUBLISH */}
         {isHost && room?.status === "draft" && (
-          <div className="mb-6 bg-slate-800 p-4 rounded">
-            <button
-              disabled={questions.length === 0 || room.status !== "draft"}
-              onClick={publishRoom}
-              className="w-full bg-green-600 py-2 rounded font-bold disabled:opacity-50"
-            >
-              Publish Room
-            </button>
-          </div>
-        )}
-
-        {/* HOST: ADD QUESTIONS */}
-        {isHost && room?.status === "draft" && (
-          <div className="mb-6 bg-slate-800 p-4 rounded">
+          <div className="bg-slate-800 p-4 rounded mb-4">
             <input
               className="w-full p-3 mb-3 rounded bg-slate-700"
-              placeholder="Question text"
+              placeholder="Question"
               value={newQuestionText}
               onChange={(e) => setNewQuestionText(e.target.value)}
             />
-
             <select
               className="w-full p-3 mb-3 rounded bg-slate-700"
               value={newQuestionLimit}
@@ -350,7 +361,6 @@ export default function RoomPage() {
               <option value={10}>10 options</option>
               <option value={15}>15 options</option>
             </select>
-
             <button
               onClick={addQuestion}
               className="w-full bg-orange-600 py-2 rounded font-bold"
@@ -360,54 +370,36 @@ export default function RoomPage() {
           </div>
         )}
 
-        {/* QUESTIONS LIST */}
-        {isHost && questions.length > 0 && (
-          <ul className="mb-6 space-y-2">
-            {questions.map(q => (
-              <li
-                key={q.id}
-                className="flex justify-between bg-slate-800 p-3 rounded"
+        {isHost && questions.map(q => (
+          <div key={q.id} className="flex justify-between mb-2">
+            <span>{q.order_index}. {q.text}</span>
+            {q.status === "closed" && (
+              <button
+                onClick={() => openQuestion(q.id)}
+                className="text-green-400 font-bold"
               >
-                <span>{q.order_index}. {q.text}</span>
-                {q.status === "closed" && (
-                  <button
-                    onClick={() => openQuestion(q.id)}
-                    className="text-green-400 font-bold"
-                  >
-                    Open
-                  </button>
-                )}
-                {q.status === "open" && (
-                  <span className="text-orange-400 font-bold">LIVE</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+                Open
+              </button>
+            )}
+          </div>
+        ))}
 
-        {/* ACTIVE QUESTION */}
         {activeQuestion ? (
           <>
             <h2 className="text-xl font-bold mb-4">
               {activeQuestion.text}
             </h2>
 
-            <ul className="space-y-3 mb-4">
-              {options.map(opt => (
-                <li
-                  key={opt.id}
-                  onClick={() => voteOption(opt.id)}
-                  className={`p-4 rounded flex justify-between ${
-                    hasVoted
-                      ? "bg-slate-800 opacity-70"
-                      : "bg-slate-800 hover:bg-slate-700 cursor-pointer"
-                  }`}
-                >
-                  <span>{opt.text}</span>
-                  <span>{opt.votes_count}</span>
-                </li>
-              ))}
-            </ul>
+            {options.map(opt => (
+              <div
+                key={opt.id}
+                onClick={() => voteOption(opt.id)}
+                className="bg-slate-800 p-3 rounded mb-2 flex justify-between cursor-pointer"
+              >
+                <span>{opt.text}</span>
+                <span>{opt.votes_count}</span>
+              </div>
+            ))}
 
             {!hasVoted &&
               options.length < activeQuestion.max_options && (
@@ -424,11 +416,43 @@ export default function RoomPage() {
             )}
           </>
         ) : (
-          room?.status === "live" && (
-            <p className="text-center text-slate-400">
-              Waiting for the host to start the next question…
-            </p>
-          )
+          <>
+            {!isHost && (
+              <div className="text-center mt-10">
+                <h2 className="text-2xl font-bold text-green-400">
+                  🎉 Yay! You completed it
+                </h2>
+                <p className="text-slate-400 mt-2">
+                  Waiting for the next question…
+                </p>
+              </div>
+            )}
+
+            {isHost && results.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-xl font-bold mb-3">Results</h3>
+
+                {results.map((r, i) => (
+                  <div
+                    key={i}
+                    className="flex justify-between bg-slate-800 p-2 rounded mb-2"
+                  >
+                    <span>{r.players.name}</span>
+                    <span className="text-orange-400">
+                      {r.options.text}
+                    </span>
+                  </div>
+                ))}
+
+                <button
+                  onClick={downloadCSV}
+                  className="mt-4 bg-green-600 px-4 py-2 rounded font-bold"
+                >
+                  Download Results (CSV)
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </main>
