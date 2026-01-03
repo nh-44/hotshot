@@ -55,7 +55,9 @@ export default function RoomPage() {
   const [newQuestionLimit, setNewQuestionLimit] = useState(10);
 
   const isHost =
-    room?.host_session === getSessionToken("host");
+    room?.host_session &&
+    typeof window !== "undefined" &&
+    room.host_session === getSessionToken("host");
 
   /* ================= FETCH ROOM ================= */
 
@@ -88,13 +90,10 @@ export default function RoomPage() {
       });
   }, [roomId]);
 
-  /* ================= FETCH OPTIONS ================= */
+  /* ================= FETCH OPTIONS (NO STATE RESET) ================= */
 
   useEffect(() => {
-    if (!activeQuestion) {
-      setOptions([]);
-      return;
-    }
+    if (!activeQuestion) return;
 
     const fetchOptions = async () => {
       const { data } = await supabase
@@ -203,45 +202,42 @@ export default function RoomPage() {
       .update({ status: "closed" })
       .eq("id", activeQuestion.id);
 
-    fetchResults(activeQuestion.id);
+    await fetchResults(activeQuestion.id);
+
     setActiveQuestion(null);
     setHasVoted(false);
   };
 
-  /* ================= VOTING ================= */
+  /* ================= VOTING (TYPE-SAFE) ================= */
 
-  const markVoted = async () => {
+  const getPlayerId = async (): Promise<string | null> => {
     const sessionToken = getSessionToken(roomId as string);
 
-    await supabase
-      .from("players")
-      .update({
-        has_voted: true,
-        current_question_id: activeQuestion?.id,
-      })
-      .eq("room_id", roomId)
-      .eq("session_token", sessionToken);
-
-    setHasVoted(true);
-  };
-
-  const voteOption = async (optionId: string) => {
-    if (!activeQuestion || hasVoted) return;
-
-    const sessionToken = getSessionToken(roomId as string);
-
-    const { data: player } = await supabase
+    const { data, error } = await supabase
       .from("players")
       .select("id")
       .eq("room_id", roomId)
       .eq("session_token", sessionToken)
       .single();
 
+    if (error || !data) return null;
+    return data.id;
+  };
+
+  const voteOption = async (optionId: string) => {
+    if (!activeQuestion || hasVoted) return;
+
+    const playerId = await getPlayerId();
+    if (!playerId) {
+      alert("Please refresh and try again");
+      return;
+    }
+
     await supabase.from("votes").insert({
       room_id: roomId,
       question_id: activeQuestion.id,
       option_id: optionId,
-      player_id: player.id,
+      player_id: playerId,
     });
 
     await supabase
@@ -249,11 +245,17 @@ export default function RoomPage() {
       .update({ votes_count: supabase.raw("votes_count + 1") })
       .eq("id", optionId);
 
-    await markVoted();
+    setHasVoted(true);
   };
 
   const addOptionAndVote = async (text: string) => {
     if (!text.trim() || !activeQuestion || hasVoted) return;
+
+    const playerId = await getPlayerId();
+    if (!playerId) {
+      alert("Please refresh and try again");
+      return;
+    }
 
     const { data: option, error } = await supabase
       .from("options")
@@ -265,9 +267,19 @@ export default function RoomPage() {
       .select()
       .single();
 
-    if (!error) {
-      voteOption(option.id);
+    if (error || !option) {
+      alert("Failed to add option");
+      return;
     }
+
+    await supabase.from("votes").insert({
+      room_id: roomId,
+      question_id: activeQuestion.id,
+      option_id: option.id,
+      player_id: playerId,
+    });
+
+    setHasVoted(true);
   };
 
   /* ================= RESULTS ================= */
@@ -275,11 +287,13 @@ export default function RoomPage() {
   const fetchResults = async (questionId: string) => {
     const { data } = await supabase
       .from("votes")
-      .select(`
+      .select(
+        `
         players(name),
         options(text),
         questions(text)
-      `)
+      `
+      )
       .eq("question_id", questionId);
 
     setResults(data || []);
@@ -304,7 +318,9 @@ export default function RoomPage() {
 
   /* ================= RENDER ================= */
 
-  if (loading) return <div className="p-10 text-white">Loading…</div>;
+  if (loading) {
+    return <div className="p-10 text-white">Loading…</div>;
+  }
 
   if (!joined && room?.status === "live") {
     return (
@@ -321,7 +337,7 @@ export default function RoomPage() {
             onClick={joinRoom}
             className="w-full bg-orange-600 py-3 rounded font-bold"
           >
-            Join Room
+            Start HotShot
           </button>
         </div>
       </main>
@@ -330,63 +346,67 @@ export default function RoomPage() {
 
   return (
     <main className="min-h-screen bg-slate-900 text-white p-6">
-      <div className="max-w-xl mx-auto">
+      <div className="max-w-3xl mx-auto">
 
         <h1 className="text-2xl font-bold mb-4">{room?.room_name}</h1>
 
         {isHost && room?.status === "draft" && (
-          <button
-            disabled={questions.length === 0}
-            onClick={publishRoom}
-            className="w-full bg-green-600 py-2 rounded font-bold mb-4"
-          >
-            Publish Room
-          </button>
-        )}
-
-        {isHost && room?.status === "draft" && (
-          <div className="bg-slate-800 p-4 rounded mb-4">
-            <input
-              className="w-full p-3 mb-3 rounded bg-slate-700"
-              placeholder="Question"
-              value={newQuestionText}
-              onChange={(e) => setNewQuestionText(e.target.value)}
-            />
-            <select
-              className="w-full p-3 mb-3 rounded bg-slate-700"
-              value={newQuestionLimit}
-              onChange={(e) => setNewQuestionLimit(Number(e.target.value))}
-            >
-              <option value={5}>5 options</option>
-              <option value={10}>10 options</option>
-              <option value={15}>15 options</option>
-            </select>
+          <>
             <button
-              onClick={addQuestion}
-              className="w-full bg-orange-600 py-2 rounded font-bold"
+              disabled={questions.length === 0}
+              onClick={publishRoom}
+              className="w-full bg-green-600 py-2 rounded font-bold mb-4"
             >
-              Add Question
+              Publish Room
             </button>
-          </div>
+
+            <div className="bg-slate-800 p-4 rounded mb-6">
+              <input
+                className="w-full p-3 mb-3 rounded bg-slate-700"
+                placeholder="Question text"
+                value={newQuestionText}
+                onChange={(e) => setNewQuestionText(e.target.value)}
+              />
+              <select
+                className="w-full p-3 mb-3 rounded bg-slate-700"
+                value={newQuestionLimit}
+                onChange={(e) => setNewQuestionLimit(Number(e.target.value))}
+              >
+                <option value={5}>5 options</option>
+                <option value={10}>10 options</option>
+                <option value={15}>15 options</option>
+              </select>
+              <button
+                onClick={addQuestion}
+                className="w-full bg-orange-600 py-2 rounded font-bold"
+              >
+                Add Question
+              </button>
+            </div>
+          </>
         )}
 
-        {isHost && questions.map(q => (
-          <div key={q.id} className="flex justify-between mb-2">
-            <span>{q.order_index}. {q.text}</span>
-            {q.status === "closed" && (
-              <button
-                onClick={() => openQuestion(q.id)}
-                className="text-green-400 font-bold"
-              >
-                Open
-              </button>
-            )}
-          </div>
-        ))}
+        {isHost &&
+          questions.map(q => (
+            <div
+              key={q.id}
+              className="flex justify-between bg-slate-800 p-3 rounded mb-2"
+            >
+              <span>{q.order_index}. {q.text}</span>
+              {q.status === "closed" && (
+                <button
+                  onClick={() => openQuestion(q.id)}
+                  className="text-green-400 font-bold"
+                >
+                  Open
+                </button>
+              )}
+            </div>
+          ))}
 
         {activeQuestion ? (
           <>
-            <h2 className="text-xl font-bold mb-4">
+            <h2 className="text-xl font-bold mt-6 mb-4">
               {activeQuestion.text}
             </h2>
 
@@ -394,7 +414,9 @@ export default function RoomPage() {
               <div
                 key={opt.id}
                 onClick={() => voteOption(opt.id)}
-                className="bg-slate-800 p-3 rounded mb-2 flex justify-between cursor-pointer"
+                className={`bg-slate-800 p-3 rounded mb-2 flex justify-between ${
+                  hasVoted ? "opacity-60" : "cursor-pointer hover:bg-slate-700"
+                }`}
               >
                 <span>{opt.text}</span>
                 <span>{opt.votes_count}</span>
@@ -420,7 +442,7 @@ export default function RoomPage() {
             {!isHost && (
               <div className="text-center mt-10">
                 <h2 className="text-2xl font-bold text-green-400">
-                  🎉 Yay! You completed it
+                  🎉 Yay! You finished!
                 </h2>
                 <p className="text-slate-400 mt-2">
                   Waiting for the next question…
